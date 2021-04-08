@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 
+use Audio::Wav;
 use DateTime;
 use File::Slurp qw(write_file);
 use Spreadsheet::XLSX;
@@ -58,9 +59,10 @@ run_loop();
 
 sub run_loop
 {
-    #copy_files_from_scanner();
+    copy_files_from_scanner();
     build_local_freq_db();
     my @sessions = refine_discovery();
+    push @sessions, refine_recordings();
     build_web_pages(@sessions);
     clean_up();
 }
@@ -94,7 +96,13 @@ sub build_web_pages
                 my $file_html = '';
                 for my $file (@{ $hit->{rec_files} || [] })
                 {
-                    my $orig_file = "./tmp/stage/Conventional/$session->{name}/$hit->{directory}/$file";
+                    my $base = "./tmp/stage/Conventional/$session->{name}/$hit->{directory}";
+                    if ($hit->{recording})
+                    {
+                        $base = "./tmp/stage/user_rec";
+                    }
+                    my $orig_file = "$base/$file";
+                    #my $orig_file = "./tmp/stage/Conventional/$session->{name}/$hit->{directory}/$file";
                     # skip silent files
                     my $size = -s $orig_file;
                     if ($size > 25000) {
@@ -167,10 +175,81 @@ sub build_web_pages
     }
 }
 
+sub refine_recordings
+{
+    opendir( my $dh, './tmp/stage/user_rec' );
+    my @subsets = grep { $_ ne '.' and $_ ne '..' } readdir($dh);
+    closedir $dh;
+
+    my %freqs;
+
+    for my $subset (@subsets)
+    {
+        next unless $subset =~ /(\d+)/;
+        opendir( my $dh2, "./tmp/stage/user_rec/$subset" );
+        my @files = grep { $_ ne '.' and $_ ne '..' } readdir($dh2);
+        closedir $dh2;
+
+        for my $file (sort @files)
+        {
+            my $wav = Audio::Wav->new->read( "./tmp/stage/user_rec/$subset/$file" );
+            my $list = $wav->details->{info}{subject};
+            my $freq = $wav->details->{info}{name};
+            my $dept = $wav->details->{info}{genre};
+            my $system = $wav->details->{info}{artist};
+            my $tone = $wav->details->{info}{supplier};
+
+            $freq =~ /^\s+?(\d+)\.(\d+)MHz/ or next;
+            $freq = "$1.$2";
+
+            if ($tone =~ /TCSS:(\d+)\.(\d+)Hz/)
+            {
+                $tone = "$1.$2";
+            }
+            elsif ($tone =~ /DCS:(\d+)\.(\d+)Hz/)
+            {
+                $tone = "D$1";
+            }
+            elsif ($tone =~ /olor Code:\s+?(\d+)/)
+            {
+                $tone = "ColorCode$1";
+            }
+            # TODO P25
+            else
+            {
+                $tone = "None";
+            }
+
+            $freqs{$freq}{$tone} ||= {
+                frequency => $freq,
+                tone      => $tone,
+                recording => 1,
+                rec_files => [],
+            };
+
+            push @{ $freqs{$freq}{$tone}{rec_files} }, "$subset/$file";
+        }
+    }
+
+    my @hits;
+    for my $freq ( keys %freqs )
+    {
+        for my $tone ( keys %{ $freqs{$freq} } )
+        {
+            push @hits, $freqs{$freq}{$tone};
+        }
+    }
+
+    return ({
+        name => 'recordings',
+        hits => \@hits,
+    });
+}
+
 sub refine_discovery
 {
     my @sessions = find_sessions();
-    fatal_exit("No sessions found") unless @sessions;
+    return unless @sessions;
 
     my @session_data;
     for my $session (@sessions)
@@ -390,11 +469,22 @@ sub copy_files_from_scanner
         mkdir("./tmp");
         log_msg(0, 'Creating stage directory');
         mkdir("./tmp/stage");
-        log_msg(0, 'Copying files from SDS100 to local storage');
+        log_msg(0, 'Copying discovery files from SDS100 to local storage');
         system("cp -r $discovery_path ./tmp/stage");
     }
     else
     {
+        fatal_exit("Path provided for scanner incorrect or device not connected");
+    }
+
+    my $recordings_path = "$PATH_TO_SDS100/audio/user_rec";
+    if (-e $recordings_path)
+    {   
+        log_msg(0, 'Copying recordings from SDS100 to local storage');
+        system("cp -r $recordings_path ./tmp/stage");
+    }
+    else
+    {   
         fatal_exit("Path provided for scanner incorrect or device not connected");
     }
 }
